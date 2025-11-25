@@ -70,6 +70,56 @@ data:
     echo "Region: $AWS_REGION"
     echo "Mount Point: $MOUNT_POINT"
     
+    # Detect OS
+    if [ -f /etc/os-release ]; then
+      . /etc/os-release
+      OS_NAME=$ID
+      OS_VERSION=$VERSION_ID
+    fi
+    
+    echo "OS: $OS_NAME $OS_VERSION"
+    
+    # Install s3fs-fuse based on OS
+    if [ "$OS_NAME" = "amzn" ] && [[ "$OS_VERSION" == "2023"* ]]; then
+      echo "Installing s3fs-fuse for Amazon Linux 2023..."
+      
+      # Install dependencies
+      yum install -y gcc libstdc++-devel gcc-c++ fuse fuse-devel \
+        libcurl-devel libxml2-devel openssl-devel mailcap automake git
+      
+      # Download and compile s3fs-fuse
+      cd /tmp
+      if [ ! -d "s3fs-fuse" ]; then
+        git clone https://github.com/s3fs-fuse/s3fs-fuse.git
+      fi
+      cd s3fs-fuse
+      ./autogen.sh
+      ./configure --prefix=/usr --with-openssl
+      make
+      make install
+      
+      echo "s3fs-fuse installed: $(s3fs --version)"
+      
+    elif [ "$OS_NAME" = "amzn" ]; then
+      echo "Installing s3fs-fuse for Amazon Linux 2..."
+      amazon-linux-extras install epel -y
+      yum install -y s3fs-fuse
+      
+    else
+      echo "Installing s3fs-fuse (generic)..."
+      yum install -y s3fs-fuse || {
+        echo "Trying alternative installation..."
+        yum install -y epel-release
+        yum install -y s3fs-fuse
+      }
+    fi
+    
+    # Verify installation
+    which s3fs || {
+      echo "ERROR: s3fs not found after installation"
+      exit 1
+    }
+    
     # Create mount point
     mkdir -p "$MOUNT_POINT"
     mkdir -p /tmp/s3fs
