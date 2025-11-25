@@ -1,0 +1,143 @@
+# Default values for sftp-server
+# This is a YAML-formatted file.
+
+# Replica count
+replicaCount: 1
+
+image:
+  sftp:
+    repository: atmoz/sftp
+    tag: alpine
+    pullPolicy: IfNotPresent
+  s3mount:
+    repository: amazon/aws-cli
+    tag: latest
+    pullPolicy: IfNotPresent
+
+# Service Account for IRSA
+serviceAccount:
+  create: true
+  name: sftp-sa
+  annotations: {}
+    # eks.amazonaws.com/role-arn: arn:aws:iam::ACCOUNT:role/sftp-pod-role
+
+# S3 Configuration
+s3:
+  bucketName: ""
+  region: us-east-1
+  mountPoint: /mnt/s3
+
+# SFTP Users
+# Format: username:password:uid:gid::home_dir or username:e:uid:gid::home_dir (for key-only auth)
+users: []
+  # - username: user1
+  #   password: "password123"
+  #   publicKey: null
+  # - username: user2
+  #   password: null
+  #   publicKey: "ssh-rsa AAAAB3..."
+
+# SSH Keys (for users with publicKey)
+sshKeys: {}
+  # user2.pub: "ssh-rsa AAAAB3..."
+
+# Services
+service:
+  internal:
+    enabled: true
+    type: ClusterIP
+    port: 22
+    annotations: {}
+  
+  external:
+    enabled: true
+    type: LoadBalancer
+    port: 22
+    annotations:
+      service.beta.kubernetes.io/aws-load-balancer-type: nlb
+      service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+    # Whitelist source IPs
+    loadBalancerSourceRanges: []
+      # - 203.0.113.0/24
+      # - 198.51.100.0/24
+    externalTrafficPolicy: Local
+
+# Resources
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+# Security Context
+securityContext:
+  privileged: true
+  capabilities:
+    add:
+      - SYS_ADMIN
+
+# Probes
+livenessProbe:
+  enabled: true
+  tcpSocket:
+    port: 22
+  initialDelaySeconds: 30
+  periodSeconds: 10
+
+readinessProbe:
+  enabled: true
+  tcpSocket:
+    port: 22
+  initialDelaySeconds: 5
+  periodSeconds: 5
+
+# Node Selector
+nodeSelector: {}
+
+# Tolerations
+tolerations: []
+
+# Affinity
+affinity: {}
+
+# Pod Annotations
+podAnnotations: {}
+
+# Pod Labels
+podLabels: {}
+
+# SSHD Configuration
+sshdConfig:
+  enabled: true
+  port: 22
+  passwordAuthentication: true
+  pubkeyAuthentication: true
+  permitRootLogin: false
+  maxAuthTries: 3
+  maxSessions: 10
+
+# s3fs-fuse mount options
+s3fsOptions:
+  iamRole: auto
+  allowOther: true
+  useCache: /tmp/s3fs
+  ensureDiskfree: 500
+  umask: "0022"
+  uid: 1001
+  gid: 1001
+  multireqMax: 5
+  maxStatCacheSize: 1000
+  statCacheExpire: 900
+
+# Extra environment variables
+extraEnv: []
+  # - name: DEBUG
+  #   value: "true"
+
+# Extra volumes
+extraVolumes: []
+
+# Extra volume mounts
+extraVolumeMounts: []

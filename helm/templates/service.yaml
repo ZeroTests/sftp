@@ -1,0 +1,54 @@
+{{- if .Values.service.internal.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "sftp-server.fullname" . }}-internal
+  labels:
+    {{- include "sftp-server.labels" . | nindent 4 }}
+    service-type: internal
+  {{- with .Values.service.internal.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.internal.type }}
+  ports:
+  - port: {{ .Values.service.internal.port }}
+    targetPort: sftp
+    protocol: TCP
+    name: sftp
+  selector:
+    {{- include "sftp-server.selectorLabels" . | nindent 4 }}
+  sessionAffinity: ClientIP
+{{- end }}
+---
+{{- if .Values.service.external.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "sftp-server.fullname" . }}-external
+  labels:
+    {{- include "sftp-server.labels" . | nindent 4 }}
+    service-type: external
+  {{- with .Values.service.external.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.external.type }}
+  {{- with .Values.service.external.loadBalancerSourceRanges }}
+  loadBalancerSourceRanges:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with .Values.service.external.externalTrafficPolicy }}
+  externalTrafficPolicy: {{ . }}
+  {{- end }}
+  ports:
+  - port: {{ .Values.service.external.port }}
+    targetPort: sftp
+    protocol: TCP
+    name: sftp
+  selector:
+    {{- include "sftp-server.selectorLabels" . | nindent 4 }}
+  sessionAffinity: ClientIP
+{{- end }}

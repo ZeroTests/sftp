@@ -1,0 +1,141 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "sftp-server.fullname" . }}-config
+  labels:
+    {{- include "sftp-server.labels" . | nindent 4 }}
+data:
+  users.conf: |
+    {{- range .Values.users }}
+    {{- if .password }}
+    {{ .username }}:{{ .password }}:1001:1001::/home/{{ .username }}
+    {{- else }}
+    {{ .username }}:e:1001:1001::/home/{{ .username }}
+    {{- end }}
+    {{- end }}
+  
+  {{- if .Values.sshdConfig.enabled }}
+  sshd_config: |
+    # SFTP Server Configuration
+    Port {{ .Values.sshdConfig.port }}
+    Protocol 2
+    HostKey /etc/ssh/ssh_host_rsa_key
+    HostKey /etc/ssh/ssh_host_ecdsa_key
+    HostKey /etc/ssh/ssh_host_ed25519_key
+    
+    # Authentication
+    PasswordAuthentication {{ .Values.sshdConfig.passwordAuthentication | ternary "yes" "no" }}
+    PubkeyAuthentication {{ .Values.sshdConfig.pubkeyAuthentication | ternary "yes" "no" }}
+    ChallengeResponseAuthentication no
+    
+    # Security
+    PermitRootLogin {{ .Values.sshdConfig.permitRootLogin | ternary "yes" "no" }}
+    StrictModes yes
+    MaxAuthTries {{ .Values.sshdConfig.maxAuthTries }}
+    MaxSessions {{ .Values.sshdConfig.maxSessions }}
+    
+    # SFTP Configuration
+    Subsystem sftp internal-sftp
+    
+    # Logging
+    SyslogFacility AUTH
+    LogLevel INFO
+    
+    # Match all users
+    Match User *
+        ForceCommand internal-sftp
+        ChrootDirectory /home/%u
+        X11Forwarding no
+        AllowTcpForwarding no
+  {{- end }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "sftp-server.fullname" . }}-scripts
+  labels:
+    {{- include "sftp-server.labels" . | nindent 4 }}
+data:
+  s3-mount.sh: |
+    #!/bin/bash
+    set -e
+    
+    echo "=== Starting S3 Mount Process ==="
+    
+    BUCKET_NAME="${S3_BUCKET_NAME}"
+    AWS_REGION="${AWS_REGION}"
+    MOUNT_POINT="${MOUNT_POINT}"
+    
+    echo "Bucket: $BUCKET_NAME"
+    echo "Region: $AWS_REGION"
+    echo "Mount Point: $MOUNT_POINT"
+    
+    # Create mount point
+    mkdir -p "$MOUNT_POINT"
+    mkdir -p /tmp/s3fs
+    
+    # Mount S3 bucket
+    echo "Mounting S3 bucket..."
+    s3fs "$BUCKET_NAME" "$MOUNT_POINT" \
+      -o iam_role={{ .Values.s3fsOptions.iamRole }} \
+      -o url=https://s3.$AWS_REGION.amazonaws.com \
+      -o endpoint=$AWS_REGION \
+      -o dbglevel=info \
+      {{- if .Values.s3fsOptions.allowOther }}
+      -o allow_other \
+      {{- end }}
+      -o use_cache={{ .Values.s3fsOptions.useCache }} \
+      -o ensure_diskfree={{ .Values.s3fsOptions.ensureDiskfree }} \
+      -o umask={{ .Values.s3fsOptions.umask }} \
+      -o uid={{ .Values.s3fsOptions.uid }} \
+      -o gid={{ .Values.s3fsOptions.gid }} \
+      -o multireq_max={{ .Values.s3fsOptions.multireqMax }} \
+      -o max_stat_cache_size={{ .Values.s3fsOptions.maxStatCacheSize }} \
+      -o stat_cache_expire={{ .Values.s3fsOptions.statCacheExpire }}
+    
+    # Verify mount
+    if mountpoint -q "$MOUNT_POINT"; then
+        echo "✓ S3 bucket mounted successfully"
+    else
+        echo "✗ Failed to mount S3 bucket"
+        exit 1
+    fi
+    
+    echo "=== S3 Mount Complete ==="
+    df -h "$MOUNT_POINT"
+  
+  setup-users.sh: |
+    #!/bin/bash
+    set -e
+    
+    echo "=== Setting Up SFTP Users ==="
+    
+    MOUNT_POINT="${MOUNT_POINT}"
+    
+    # Create SSH directory
+    mkdir -p /home/.ssh/keys
+    chmod 700 /home/.ssh/keys
+    
+    {{- range .Values.users }}
+    echo "Setting up user: {{ .username }}"
+    USER_HOME="$MOUNT_POINT/{{ .username }}"
+    
+    # Create user directory
+    mkdir -p "$USER_HOME"/.ssh
+    chmod 700 "$USER_HOME"/.ssh
+    
+    {{- if .publicKey }}
+    # Copy SSH key if exists
+    if [ -f "/home/.ssh/keys/{{ .username }}.pub" ]; then
+        cp "/home/.ssh/keys/{{ .username }}.pub" "$USER_HOME/.ssh/authorized_keys"
+        chmod 600 "$USER_HOME/.ssh/authorized_keys"
+        chown 1001:1001 "$USER_HOME/.ssh/authorized_keys"
+        echo "  ✓ SSH key configured"
+    fi
+    {{- end }}
+    
+    # Set ownership
+    chown -R 1001:1001 "$USER_HOME"
+    {{- end }}
+    
+    echo "=== User Setup Complete ==="
