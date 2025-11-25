@@ -13,50 +13,56 @@ spec:
     metadata:
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
-        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
-        {{- with .Values.podAnnotations }}
-        {{- toYaml . | nindent 8 }}
-        {{- end }}
       labels:
         {{- include "sftp-server.selectorLabels" . | nindent 8 }}
-        {{- with .Values.podLabels }}
-        {{- toYaml . | nindent 8 }}
-        {{- end }}
     spec:
       serviceAccountName: {{ include "sftp-server.serviceAccountName" . }}
+      
       initContainers:
-      - name: s3-mount
+      # Step 1: Install s3fs-fuse
+      - name: install-s3fs
         image: "{{ .Values.image.s3mount.repository }}:{{ .Values.image.s3mount.tag }}"
-        imagePullPolicy: {{ .Values.image.s3mount.pullPolicy }}
-        command:
-        - /bin/sh
-        - -c
+        command: ["/bin/bash", "/scripts/install-s3fs.sh"]
+        volumeMounts:
+        - name: scripts
+          mountPath: /scripts
+        - name: usr-local-bin
+          mountPath: /usr-local-bin-shared
+        securityContext:
+          privileged: true
+      
+      # Step 2: Mount S3 bucket
+      - name: mount-s3
+        image: "{{ .Values.image.s3mount.repository }}:{{ .Values.image.s3mount.tag }}"
+        command: ["/bin/bash", "-c"]
+        args:
         - |
           set -e
-          echo "=== Installing s3fs-fuse ==="
-          yum install -y s3fs-fuse amazon-efs-utils fuse
           
-          echo "=== Running mount script ==="
-          chmod +x /scripts/s3-mount.sh
+          # Copy s3fs binary if needed
+          if [ -f /usr/bin/s3fs ]; then
+            echo "Using s3fs from /usr/bin/s3fs"
+          elif [ -f /usr/local/bin/s3fs ]; then
+            echo "Using s3fs from /usr/local/bin/s3fs"
+          else
+            echo "ERROR: s3fs not found"
+            exit 1
+          fi
+          
+          # Run mount script
           /scripts/s3-mount.sh
           
-          echo "=== Setting up users ==="
-          chmod +x /scripts/setup-users.sh
+          # Setup users
           /scripts/setup-users.sh
           
-          echo "=== Initialization complete ==="
+          echo "=== Init Complete ==="
         env:
-        - name: AWS_REGION
-          value: {{ .Values.s3.region }}
         - name: S3_BUCKET_NAME
           value: {{ .Values.s3.bucketName }}
+        - name: AWS_REGION
+          value: {{ .Values.s3.region }}
         - name: MOUNT_POINT
           value: {{ .Values.s3.mountPoint }}
-        {{- with .Values.extraEnv }}
-        {{- toYaml . | nindent 8 }}
-        {{- end }}
-        securityContext:
-          {{- toYaml .Values.securityContext | nindent 10 }}
         volumeMounts:
         - name: s3-storage
           mountPath: {{ .Values.s3.mountPoint }}
@@ -66,26 +72,25 @@ spec:
         - name: ssh-keys
           mountPath: /home/.ssh/keys
           readOnly: true
+        securityContext:
+          privileged: true
+          capabilities:
+            add: ["SYS_ADMIN"]
+      
       containers:
+      # Main SFTP container
       - name: sftp
         image: "{{ .Values.image.sftp.repository }}:{{ .Values.image.sftp.tag }}"
         imagePullPolicy: {{ .Values.image.sftp.pullPolicy }}
         ports:
         - name: sftp
-          containerPort: {{ .Values.sshdConfig.port }}
+          containerPort: 22
           protocol: TCP
+        
         env:
         - name: AWS_REGION
           value: {{ .Values.s3.region }}
-        {{- with .Values.extraEnv }}
-        {{- toYaml . | nindent 8 }}
-        {{- end }}
-        securityContext:
-          capabilities:
-            add:
-            - SYS_ADMIN
-        resources:
-          {{- toYaml .Values.resources | nindent 10 }}
+        
         volumeMounts:
         - name: s3-storage
           mountPath: /home
@@ -93,56 +98,62 @@ spec:
         - name: sftp-config
           mountPath: /etc/sftp/users.conf
           subPath: users.conf
-        - name: ssh-keys
-          mountPath: /home/.ssh/keys
-          readOnly: true
         {{- if .Values.sshdConfig.enabled }}
-        - name: sshd-config
+        - name: sftp-config
           mountPath: /etc/ssh/sshd_config
           subPath: sshd_config
         {{- end }}
-        {{- with .Values.extraVolumeMounts }}
-        {{- toYaml . | nindent 8 }}
-        {{- end }}
-        {{- if .Values.livenessProbe.enabled }}
+        
+        securityContext:
+          capabilities:
+            add: ["SYS_ADMIN"]
+        
+        resources:
+          {{- toYaml .Values.resources | nindent 10 }}
+        
         livenessProbe:
-          {{- toYaml .Values.livenessProbe | nindent 10 }}
-        {{- end }}
-        {{- if .Values.readinessProbe.enabled }}
+          tcpSocket:
+            port: 22
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        
         readinessProbe:
-          {{- toYaml .Values.readinessProbe | nindent 10 }}
-        {{- end }}
+          tcpSocket:
+            port: 22
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+      
       volumes:
       - name: s3-storage
         emptyDir: {}
+      
       - name: scripts
         configMap:
           name: {{ include "sftp-server.fullname" . }}-scripts
           defaultMode: 0755
+      
       - name: sftp-config
         configMap:
           name: {{ include "sftp-server.fullname" . }}-config
+      
       - name: ssh-keys
         secret:
           secretName: {{ include "sftp-server.fullname" . }}-ssh-keys
           defaultMode: 0600
           optional: true
-      {{- if .Values.sshdConfig.enabled }}
-      - name: sshd-config
-        configMap:
-          name: {{ include "sftp-server.fullname" . }}-config
-      {{- end }}
-      {{- with .Values.extraVolumes }}
-      {{- toYaml . | nindent 6 }}
-      {{- end }}
+      
+      - name: usr-local-bin
+        emptyDir: {}
+      
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.affinity }}
-      affinity:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
+      
       {{- with .Values.tolerations }}
       tolerations:
         {{- toYaml . | nindent 8 }}

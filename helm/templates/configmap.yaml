@@ -16,38 +16,33 @@ data:
   
   {{- if .Values.sshdConfig.enabled }}
   sshd_config: |
-    # SFTP Server Configuration
     Port {{ .Values.sshdConfig.port }}
     Protocol 2
     HostKey /etc/ssh/ssh_host_rsa_key
     HostKey /etc/ssh/ssh_host_ecdsa_key
     HostKey /etc/ssh/ssh_host_ed25519_key
     
-    # Authentication
     PasswordAuthentication {{ .Values.sshdConfig.passwordAuthentication | ternary "yes" "no" }}
     PubkeyAuthentication {{ .Values.sshdConfig.pubkeyAuthentication | ternary "yes" "no" }}
     ChallengeResponseAuthentication no
     
-    # Security
     PermitRootLogin {{ .Values.sshdConfig.permitRootLogin | ternary "yes" "no" }}
     StrictModes yes
     MaxAuthTries {{ .Values.sshdConfig.maxAuthTries }}
     MaxSessions {{ .Values.sshdConfig.maxSessions }}
     
-    # SFTP Configuration
     Subsystem sftp internal-sftp
     
-    # Logging
     SyslogFacility AUTH
     LogLevel INFO
     
-    # Match all users
     Match User *
         ForceCommand internal-sftp
         ChrootDirectory /home/%u
         X11Forwarding no
         AllowTcpForwarding no
   {{- end }}
+
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -56,11 +51,78 @@ metadata:
   labels:
     {{- include "sftp-server.labels" . | nindent 4 }}
 data:
+  install-s3fs.sh: |
+    #!/bin/bash
+    set -e
+    
+    echo "=== Installing s3fs-fuse ==="
+    
+    # Detect OS
+    if [ -f /etc/os-release ]; then
+      . /etc/os-release
+      echo "Detected: $NAME $VERSION_ID"
+    fi
+    
+    # Install based on OS
+    if [[ "$ID" == "amzn" ]] && [[ "$VERSION_ID" == "2023" ]]; then
+      echo "Amazon Linux 2023 detected - compiling s3fs-fuse from source..."
+      
+      # Install build dependencies
+      yum install -y \
+        gcc \
+        gcc-c++ \
+        make \
+        automake \
+        autoconf \
+        libtool \
+        pkg-config \
+        fuse \
+        fuse-devel \
+        libcurl-devel \
+        libxml2-devel \
+        openssl-devel \
+        git \
+        tar
+      
+      # Clone and build s3fs-fuse
+      cd /tmp
+      rm -rf s3fs-fuse
+      git clone --depth 1 https://github.com/s3fs-fuse/s3fs-fuse.git
+      cd s3fs-fuse
+      
+      ./autogen.sh
+      ./configure --prefix=/usr --with-openssl
+      make -j$(nproc)
+      make install
+      
+      # Verify
+      s3fs --version
+      echo "✓ s3fs-fuse compiled and installed"
+      
+    elif [[ "$ID" == "amzn" ]] && [[ "$VERSION_ID" == "2" ]]; then
+      echo "Amazon Linux 2 detected..."
+      amazon-linux-extras install epel -y
+      yum install -y s3fs-fuse
+      
+    else
+      echo "Generic Linux detected..."
+      yum install -y epel-release || true
+      yum install -y s3fs-fuse
+    fi
+    
+    # Final verification
+    if ! command -v s3fs &> /dev/null; then
+      echo "ERROR: s3fs installation failed"
+      exit 1
+    fi
+    
+    echo "✓ s3fs-fuse ready: $(s3fs --version)"
+
   s3-mount.sh: |
     #!/bin/bash
     set -e
     
-    echo "=== Starting S3 Mount Process ==="
+    echo "=== S3 Mount Process ==="
     
     BUCKET_NAME="${S3_BUCKET_NAME}"
     AWS_REGION="${AWS_REGION}"
@@ -68,92 +130,50 @@ data:
     
     echo "Bucket: $BUCKET_NAME"
     echo "Region: $AWS_REGION"
-    echo "Mount Point: $MOUNT_POINT"
+    echo "Mount: $MOUNT_POINT"
     
-    # Detect OS
-    if [ -f /etc/os-release ]; then
-      . /etc/os-release
-      OS_NAME=$ID
-      OS_VERSION=$VERSION_ID
-    fi
-    
-    echo "OS: $OS_NAME $OS_VERSION"
-    
-    # Install s3fs-fuse based on OS
-    if [ "$OS_NAME" = "amzn" ] && [[ "$OS_VERSION" == "2023"* ]]; then
-      echo "Installing s3fs-fuse for Amazon Linux 2023..."
-      
-      # Install dependencies
-      yum install -y gcc libstdc++-devel gcc-c++ fuse fuse-devel \
-        libcurl-devel libxml2-devel openssl-devel mailcap automake git
-      
-      # Download and compile s3fs-fuse
-      cd /tmp
-      if [ ! -d "s3fs-fuse" ]; then
-        git clone https://github.com/s3fs-fuse/s3fs-fuse.git
-      fi
-      cd s3fs-fuse
-      ./autogen.sh
-      ./configure --prefix=/usr --with-openssl
-      make
-      make install
-      
-      echo "s3fs-fuse installed: $(s3fs --version)"
-      
-    elif [ "$OS_NAME" = "amzn" ]; then
-      echo "Installing s3fs-fuse for Amazon Linux 2..."
-      amazon-linux-extras install epel -y
-      yum install -y s3fs-fuse
-      
-    else
-      echo "Installing s3fs-fuse (generic)..."
-      yum install -y s3fs-fuse || {
-        echo "Trying alternative installation..."
-        yum install -y epel-release
-        yum install -y s3fs-fuse
-      }
-    fi
-    
-    # Verify installation
-    which s3fs || {
-      echo "ERROR: s3fs not found after installation"
+    # Verify s3fs is available
+    if ! command -v s3fs &> /dev/null; then
+      echo "ERROR: s3fs not found"
       exit 1
-    }
+    fi
     
-    # Create mount point
+    # Create directories
     mkdir -p "$MOUNT_POINT"
-    mkdir -p /tmp/s3fs
+    mkdir -p /tmp/s3fs-cache
+    chmod 755 "$MOUNT_POINT"
     
     # Mount S3 bucket
     echo "Mounting S3 bucket..."
     s3fs "$BUCKET_NAME" "$MOUNT_POINT" \
-      -o iam_role={{ .Values.s3fsOptions.iamRole }} \
-      -o url=https://s3.$AWS_REGION.amazonaws.com \
-      -o endpoint=$AWS_REGION \
-      -o dbglevel=info \
-      {{- if .Values.s3fsOptions.allowOther }}
+      -o iam_role=auto \
+      -o url=https://s3.${AWS_REGION}.amazonaws.com \
+      -o endpoint=${AWS_REGION} \
       -o allow_other \
-      {{- end }}
-      -o use_cache={{ .Values.s3fsOptions.useCache }} \
-      -o ensure_diskfree={{ .Values.s3fsOptions.ensureDiskfree }} \
-      -o umask={{ .Values.s3fsOptions.umask }} \
-      -o uid={{ .Values.s3fsOptions.uid }} \
-      -o gid={{ .Values.s3fsOptions.gid }} \
-      -o multireq_max={{ .Values.s3fsOptions.multireqMax }} \
-      -o max_stat_cache_size={{ .Values.s3fsOptions.maxStatCacheSize }} \
-      -o stat_cache_expire={{ .Values.s3fsOptions.statCacheExpire }}
+      -o mp_umask=022 \
+      -o uid=1001 \
+      -o gid=1001 \
+      -o use_cache=/tmp/s3fs-cache \
+      -o ensure_diskfree=500 \
+      -o multireq_max=5 \
+      -o max_stat_cache_size=1000 \
+      -o stat_cache_expire=900 \
+      -o dbglevel=info \
+      -o curldbg
     
     # Verify mount
-    if mountpoint -q "$MOUNT_POINT"; then
-        echo "✓ S3 bucket mounted successfully"
-    else
-        echo "✗ Failed to mount S3 bucket"
-        exit 1
-    fi
+    sleep 2
     
-    echo "=== S3 Mount Complete ==="
-    df -h "$MOUNT_POINT"
-  
+    if mountpoint -q "$MOUNT_POINT"; then
+      echo "✓ S3 bucket mounted successfully"
+      df -h "$MOUNT_POINT"
+      ls -la "$MOUNT_POINT" || echo "Bucket is empty or inaccessible"
+    else
+      echo "✗ Mount verification failed"
+      mount | grep s3fs || echo "No s3fs mounts found"
+      exit 1
+    fi
+
   setup-users.sh: |
     #!/bin/bash
     set -e
@@ -162,7 +182,12 @@ data:
     
     MOUNT_POINT="${MOUNT_POINT}"
     
-    # Create SSH directory
+    if ! mountpoint -q "$MOUNT_POINT"; then
+      echo "ERROR: S3 not mounted at $MOUNT_POINT"
+      exit 1
+    fi
+    
+    # Create SSH directory for keys
     mkdir -p /home/.ssh/keys
     chmod 700 /home/.ssh/keys
     
@@ -170,22 +195,61 @@ data:
     echo "Setting up user: {{ .username }}"
     USER_HOME="$MOUNT_POINT/{{ .username }}"
     
-    # Create user directory
-    mkdir -p "$USER_HOME"/.ssh
-    chmod 700 "$USER_HOME"/.ssh
+    # Create user home directory
+    if [ ! -d "$USER_HOME" ]; then
+      mkdir -p "$USER_HOME"
+      echo "  Created $USER_HOME"
+    fi
+    
+    # Create .ssh directory
+    mkdir -p "$USER_HOME/.ssh"
+    chmod 700 "$USER_HOME/.ssh"
     
     {{- if .publicKey }}
-    # Copy SSH key if exists
+    # Setup SSH key
     if [ -f "/home/.ssh/keys/{{ .username }}.pub" ]; then
-        cp "/home/.ssh/keys/{{ .username }}.pub" "$USER_HOME/.ssh/authorized_keys"
-        chmod 600 "$USER_HOME/.ssh/authorized_keys"
-        chown 1001:1001 "$USER_HOME/.ssh/authorized_keys"
-        echo "  ✓ SSH key configured"
+      cp "/home/.ssh/keys/{{ .username }}.pub" "$USER_HOME/.ssh/authorized_keys"
+      chmod 600 "$USER_HOME/.ssh/authorized_keys"
+      chown 1001:1001 "$USER_HOME/.ssh/authorized_keys"
+      echo "  ✓ SSH key configured"
+    else
+      echo "  ⚠ SSH key not found"
     fi
+    {{- else }}
+    echo "  Password authentication only"
     {{- end }}
     
     # Set ownership
     chown -R 1001:1001 "$USER_HOME"
+    chmod 755 "$USER_HOME"
+    
+    echo "  ✓ User {{ .username }} ready"
     {{- end }}
     
+    echo ""
     echo "=== User Setup Complete ==="
+    echo "User directories:"
+    ls -la "$MOUNT_POINT/" | grep -v "^total" || echo "No users found"
+
+  healthcheck.sh: |
+    #!/bin/bash
+    # Health check script
+    
+    MOUNT_POINT="${MOUNT_POINT:-/mnt/s3}"
+    
+    # Check if mounted
+    if ! mountpoint -q "$MOUNT_POINT"; then
+      echo "ERROR: S3 not mounted"
+      exit 1
+    fi
+    
+    # Check if writable
+    TEST_FILE="$MOUNT_POINT/.healthcheck"
+    if echo "ok" > "$TEST_FILE" 2>/dev/null; then
+      rm -f "$TEST_FILE"
+      echo "OK: S3 mount is healthy"
+      exit 0
+    else
+      echo "ERROR: S3 mount not writable"
+      exit 1
+    fi
